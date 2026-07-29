@@ -1,173 +1,67 @@
 # Put your custom commands here that should be executed once
 # the system init finished. By default this file does nothing.
 
-if [ ! -f /root/dyndns.sh ]; then
-cat > /root/dyndns.sh << EOF
-#!/bin/sh
+# =====================================================================
+# Hetzner DynDNS for Teltonika RutOS / OpenWrt - new Cloud API
+# (api.hetzner.cloud, replaces the retired dns.hetzner.com API)
+#
+# Set your values below BEFORE the first boot. They seed
+# /root/dyndns.conf exactly once - afterwards edit that file directly.
+# The script itself is downloaded from GitHub on every boot
+# (the local copy is kept when the download fails).
+# =====================================================================
 
-# get OS environment variables
-auth_api_token=\${HETZNER_AUTH_API_TOKEN:-'YOUR_PRIVATE_SERVICE_TOKEN'}
+# ------------- configuration (only used to seed the conf) ------------
+# Hetzner Cloud API token with read & write permissions
+HETZNER_TOKEN='YOUR_HETZNER_CLOUD_API_TOKEN'
+ZONE_NAME='YOUR.DOMAIN'
+RECORD_NAME='YOUR_RECORD_NAME'
+RECORD_TTL='300'
+# ---------------------------------------------------------------------
 
-zone_name=\${HETZNER_ZONE_NAME:-'YOUR.DOMAIN'}
-zone_id=\${HETZNER_ZONE_ID:-''}
+REPO_RAW='https://raw.githubusercontent.com/f-io/RUTX-DYNDNS-HETZNER/main'
 
-record_name=\${HETZNER_RECORD_NAME:-'YOUR_RECORD_NAME'}
-record_ttl=\${HETZNER_RECORD_TTL:-'60'}
-record_type=\${HETZNER_RECORD_TYPE:-'A'}
+# seed the config once - edit /root/dyndns.conf to change it later
+if [ ! -f /root/dyndns.conf ]; then
+cat > /root/dyndns.conf << EOF
+HETZNER_TOKEN='${HETZNER_TOKEN}'
+ZONE_NAME='${ZONE_NAME}'
+RECORD_NAME='${RECORD_NAME}'
+RECORD_TTL='${RECORD_TTL}'
+EOF
+chmod 600 /root/dyndns.conf
+fi
 
-logger() {
-  echo \${1}: Record_Name: \${record_name} : \${2}
+# download helper - keeps the old copy if the download fails
+fetch() {
+  curl -fsSL --connect-timeout 5 -o "/tmp/${1}.new" "${REPO_RAW}/${1}" \
+    && head -n1 "/tmp/${1}.new" | grep -q '^#!/bin/sh' \
+    && mv "/tmp/${1}.new" "/root/${1}" \
+    && chmod a+x "/root/${1}"
 }
 
-while getopts ":z:Z:r:n:t:T:h" opt; do
-  case "\$opt" in
-    z  ) zone_id="\${OPTARG}";;
-    Z  ) zone_name="\${OPTARG}";;
-    r  ) record_id="\${OPTARG}";;
-    n  ) record_name="\${OPTARG}";;
-    t  ) record_ttl="\${OPTARG}";;
-    T  ) record_type="\${OPTARG}";;
-    h  ) display_help;;
-    \? ) echo "Invalid option: -\$OPTARG" >&2; exit 1;;
-    :  ) echo "Missing option argument for -\$OPTARG" >&2; exit 1;;
-    *  ) echo "Unimplemented option: -\$OPTARG" >&2; exit 1;;
-  esac
-done
-
-# Check if tools are installed
-for cmd in curl jq; do
-  if ! command -v "\${cmd}" &> /dev/null; then
-	opkg -e /etc/opkg/openwrt/distfeeds.conf update
-	opkg -e /etc/opkg/openwrt/distfeeds.conf install jq
-  fi
-done
-
-# Check if api token is set 
-if [[ "\${auth_api_token}" = "" ]]; then
-  logger Error "No Auth API Token specified."
-  exit 1
-fi
-
-# get all zones
-zone_info=\$(curl -s --location \\
-          "https://dns.hetzner.com/api/v1/zones" \\
-          --header 'Auth-API-Token: '\${auth_api_token})
-
-# check if either zone_id or zone_name is correct
-if [[ "\$(echo \${zone_info} | jq --raw-output '.zones[] | select(.name=="'\${zone_name}'") | .id')" = "" && "\$(echo \${zone_info} | jq --raw-output '.zones[] | select(.id=="'\${zone_id}'") | .name')" = "" ]]; then
-  logger Error "Something went wrong. Could not find Zone ID."
-  logger Error "Check your inputs of either -z <Zone ID> or -Z <Zone Name>."
-  logger Error "Use -h to display help."
-  exit 1
-fi
-
-# get zone_id if zone_name is given and in zones
-if [[ "\${zone_id}" = "" ]]; then
-  zone_id=\$(echo \${zone_info} | jq --raw-output '.zones[] | select(.name=="'\${zone_name}'") | .id')
-fi
-
-# get zone_name if zone_id is given and in zones
-if [[ "\${zone_name}" = "" ]]; then
-  zone_name=\$(echo \${zone_info} | jq --raw-output '.zones[] | select(.id=="'\${zone_id}'") | .name')
-fi
-
-logger Info "Zone_ID: \${zone_id}"
-logger Info "Zone_Name: \${zone_name}"
-
-if [[ "\${record_name}" = "" ]]; then
-  logger Error "Mission option for record name: -n <Record Name>"
-  logger Error "Use -h to display help."
-  exit 1
-fi
-
-# get current public ip address
-if [[ "\${record_type}" = "AAAA" ]]; then
-  logger Info "Using IPv6, because AAAA was set as record type."
-  cur_pub_addr=\$(curl -s6 https://ip.hetzner.com | grep -E '^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}\$')
-  if [[ "\${cur_pub_addr}" = "" ]]; then
-    logger Error "It seems you don't have a IPv6 public address."
-    exit 1
-  else
-    logger Info "Current public IP address: \${cur_pub_addr}"
-  fi
-elif [[ "\${record_type}" = "A" ]]; then
-  logger Info "Using IPv4, because A was set as record type."
-  cur_pub_addr=\$(curl -s4 https://ip.hetzner.com | grep -E '^([0-9]+(\.|\$)){4}')
-  if [[ "\${cur_pub_addr}" = "" ]]; then
-    logger Error "Apparently there is a problem in determining the public ip address."
-    exit 1
-  else
-    logger Info "Current public IP address: \${cur_pub_addr}"
-  fi
-else 
-  logger Error "Only record type \"A\" or \"AAAA\" are support for DynDNS."
-  exit 1
-fi
-
-# get record id if not given as parameter
-if [[ "\${record_id}" = "" ]]; then
-  record_zone=\$(curl -s -w "\n%{http_code}" --location \\
-                 --request GET 'https://dns.hetzner.com/api/v1/records?zone_id='\${zone_id} \\
-                 --header 'Auth-API-Token: '\${auth_api_token})
-
-  http_code=\$(echo "\${record_zone}" | tail -n 1 )
-  if [[ "\${http_code}" != "200" ]]; then
-    logger Error "HTTP Response \${http_code} - Aborting run to prevent multipe records."
-    exit 1
-  else 
-    record_id=\$(echo \${record_zone} | jq | sed '\$d' | jq --raw-output '.records[] | select(.type == "'\${record_type}'") | select(.name == "'\${record_name}'") | .id')
-  fi
-fi 
-
-logger Info "Record_ID: \${record_id}"
-
-# create a new record
-if [[ "\${record_id}" = "" ]]; then
-  echo "DNS record \"\${record_name}\" does not exists - will be created."
-  curl -s -X "POST" "https://dns.hetzner.com/api/v1/records" \\
-       -H 'Content-Type: application/json' \\
-       -H 'Auth-API-Token: '\${auth_api_token} \\
-       -d \$'{
-          "value": "'\${cur_pub_addr}'",
-          "ttl": '\${record_ttl}',
-          "type": "'\${record_type}'",
-          "name": "'\${record_name}'",
-          "zone_id": "'\${zone_id}'"
-        }'
+# wait for the WAN to come up if there is no local copy yet
+if [ ! -f /root/dyndns.sh ]; then
+  i=0
+  while [ $i -lt 12 ]; do
+    fetch dyndns.sh && break
+    i=$((i+1))
+    sleep 5
+  done
 else
-# check if update is needed
-  cur_dyn_addr=\`curl -s "https://dns.hetzner.com/api/v1/records/\${record_id}" -H 'Auth-API-Token: '\${auth_api_token} | jq --raw-output '.record.value'\`
-
-  logger Info "Currently set IP address: \${cur_dyn_addr}"
-
-# update existing record
-  if [[ \$cur_pub_addr == \$cur_dyn_addr ]]; then
-    logger Info "DNS record \"\${record_name}\" is up to date - nothing to to."
-    exit 0
-  else
-    logger Info "DNS record \"\${record_name}\" is no longer valid - updating record" 
-    curl -s -X "PUT" "https://dns.hetzner.com/api/v1/records/\${record_id}" \\
-         -H 'Content-Type: application/json' \\
-         -H 'Auth-API-Token: '\${auth_api_token} \\
-         -d \$'{
-           "value": "'\${cur_pub_addr}'",
-           "ttl": '\${record_ttl}',
-           "type": "'\${record_type}'",
-            "name": "'\${record_name}'",
-           "zone_id": "'\${zone_id}'"
-         }'
-    if [[ \$? != 0 ]]; then
-      logger Error "Unable to update record: \"\${record_name}\""
-    else
-      logger Info "DNS record \"\${record_name}\" updated successfully"
-    fi
-  fi
-fi
-EOF
-chmod a+x /root/dyndns.sh
+  fetch dyndns.sh
 fi
 
-#check for crontab and create if not existing
-grep '/root/dyndns.sh' /etc/crontabs/root || echo '*/2 * * * * /root/dyndns.sh >/dev/null 2>&1' >> /etc/crontabs/root
+# cron: a single auto-mode entry updates A and/or AAAA - whatever the
+# uplink currently provides; stale -T entries from older setups are removed
+CRONTAB=/etc/crontabs/root
+touch "$CRONTAB"
+sed -i '/dyndns\.sh -T/d' "$CRONTAB"
+grep -q '/root/dyndns.sh' "$CRONTAB" || \
+  echo '*/2 * * * * /root/dyndns.sh >/dev/null 2>&1' >> "$CRONTAB"
+/etc/init.d/cron restart
+
+# update the records once right after boot
+[ -x /root/dyndns.sh ] && /root/dyndns.sh >/dev/null 2>&1 &
 
 exit 0

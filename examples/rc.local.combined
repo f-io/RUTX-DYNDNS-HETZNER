@@ -1,0 +1,114 @@
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# =====================================================================
+# Combined example: DynDNS + SSL + GPS on one Teltonika RutOS device
+#
+#   DynDNS - https://github.com/f-io/RUTX-DYNDNS-HETZNER
+#   SSL    - https://github.com/f-io/RUTX-SSL
+#   GPS    - https://github.com/f-io/RUTX-GPS
+#
+# Set your values below BEFORE the first boot. They seed the config
+# files exactly once - afterwards edit /root/dyndns.conf,
+# /root/ssl.conf and /root/gps.conf directly. The scripts are
+# downloaded from their repos on every boot (local copies are kept
+# when a download fails).
+# =====================================================================
+
+# ------------- configuration (only used to seed the confs) -----------
+# Hetzner Cloud API token with read & write permissions
+# (shared by DynDNS and SSL)
+HETZNER_TOKEN='YOUR_HETZNER_CLOUD_API_TOKEN'
+
+# DynDNS
+ZONE_NAME='YOUR.DOMAIN'
+RECORD_NAME='YOUR_RECORD_NAME'
+RECORD_TTL='300'
+
+# SSL (acme.sh via dns_hetznercloud)
+SSL_DOMAIN='YOUR_RECORD_NAME.YOUR.DOMAIN'
+ACME_MAIL='YOURMAIL@ANY.DOMAIN.COM'
+
+# GPS -> Nextcloud PhoneTrack
+NEXTCLOUD_URL='https://YOUR_NEXTCLOUD.URL'
+PHONETRACK_SESSION='YOUR_SESSION_ID'
+GPS_NAME='YOUR_DEVICE_NAME'
+# 5s => ~15.000p/24h ≈ ~90 MB/day ≈ 2,7 GB/month
+# 30s => ~2.800p/24h ≈ ~17 MB/day ≈ 0,5 GB/month
+# 60s => ~1.400p/24h ≈ ~8 MB/day ≈ 0,25 GB/month
+GPS_DELAY='30' 
+GPS_INTERFACES='qmimux0 wwan0 eth0 wlan0-2'
+# ---------------------------------------------------------------------
+
+# seed the config files once - edit them directly to change values later
+if [ ! -f /root/dyndns.conf ]; then
+cat > /root/dyndns.conf << EOF
+HETZNER_TOKEN='${HETZNER_TOKEN}'
+ZONE_NAME='${ZONE_NAME}'
+RECORD_NAME='${RECORD_NAME}'
+RECORD_TTL='${RECORD_TTL}'
+EOF
+chmod 600 /root/dyndns.conf
+fi
+
+if [ ! -f /root/ssl.conf ]; then
+cat > /root/ssl.conf << EOF
+HETZNER_TOKEN='${HETZNER_TOKEN}'
+SSL_DOMAIN='${SSL_DOMAIN}'
+ACME_MAIL='${ACME_MAIL}'
+EOF
+chmod 600 /root/ssl.conf
+fi
+
+if [ ! -f /root/gps.conf ]; then
+cat > /root/gps.conf << EOF
+NEXTCLOUD_URL='${NEXTCLOUD_URL}'
+PHONETRACK_SESSION='${PHONETRACK_SESSION}'
+GPS_NAME='${GPS_NAME}'
+GPS_DELAY='${GPS_DELAY}'
+GPS_INTERFACES='${GPS_INTERFACES}'
+EOF
+chmod 600 /root/gps.conf
+fi
+
+# download helper - keeps the old copy if the download fails
+# usage: fetch <repo> <script>
+fetch() {
+  curl -fsSL --connect-timeout 5 -o "/tmp/${2}.new" \
+      "https://raw.githubusercontent.com/f-io/${1}/main/${2}" \
+    && head -n1 "/tmp/${2}.new" | grep -q '^#!/bin/sh' \
+    && mv "/tmp/${2}.new" "/root/${2}" \
+    && chmod a+x "/root/${2}"
+}
+
+# wait for the WAN to come up if there is no local copy yet
+if [ ! -f /root/dyndns.sh ]; then
+  i=0
+  while [ $i -lt 12 ]; do
+    fetch RUTX-DYNDNS-HETZNER dyndns.sh && break
+    i=$((i+1))
+    sleep 5
+  done
+else
+  fetch RUTX-DYNDNS-HETZNER dyndns.sh
+fi
+fetch RUTX-SSL ssl.sh
+fetch RUTX-GPS gps_nextcloud.sh
+
+# cron: a single auto-mode entry updates A and/or AAAA - whatever the
+# uplink currently provides; stale -T entries from older setups are removed
+CRONTAB=/etc/crontabs/root
+touch "$CRONTAB"
+sed -i '/dyndns\.sh -T/d' "$CRONTAB"
+grep -q '/root/dyndns.sh' "$CRONTAB" || \
+  echo '*/2 * * * * /root/dyndns.sh >/dev/null 2>&1' >> "$CRONTAB"
+/etc/init.d/cron restart
+
+# first update the DNS records, then check the certificate, then start GPS
+[ -x /root/dyndns.sh ] && /root/dyndns.sh >/dev/null 2>&1 &
+[ -x /root/ssl.sh ] && /root/ssl.sh >/dev/null 2>&1 &
+if [ -x /root/gps_nextcloud.sh ] && ! pgrep -f gps_nextcloud.sh >/dev/null 2>&1; then
+  /root/gps_nextcloud.sh >/dev/null 2>&1 &
+fi
+
+exit 0
